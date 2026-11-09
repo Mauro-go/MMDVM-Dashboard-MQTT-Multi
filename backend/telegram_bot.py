@@ -111,110 +111,221 @@ class Bot:
 
     def on_message(self, client, userdata, msg):
         try:
-            payload = json.loads(msg.payload.decode('utf-8'))
-            if not isinstance(payload, dict):
+            event = json.loads(msg.payload.decode('utf-8'))
+            if not isinstance(event, dict):
                 return
-            # MMDVMHost MQTT: {"DMR": {...}} oppure {"D-Star": {...}}
-            if isinstance(payload.get('DMR'), dict):
-                mode = 'DMR'
-                payload = payload['DMR']
-            elif isinstance(payload.get('D-Star'), dict):
-                mode = 'D-Star'
-                payload = payload['D-Star']
-            else:
-                return
-            action = str(payload.get('action', '')).lower()
-            if action not in ('start', 'end'):
-                return
-            slot = str(payload.get('slot', '')) if mode == 'DMR' else ''
-            key = (mode, slot)
-            if action == 'start':
-                self.starts[key] = (payload, time.monotonic(), event_time(payload))
-            else:
+
+            supported = ('DMR', 'D-Star', 'YSF', 'P25', 'NXDN', 'FM', 'M17')
+
+            for mode, payload in event.items():
+                if mode not in supported or not isinstance(payload, dict):
+                    continue
+
+                if mode == 'FM':
+                    self.process_fm(payload)
+                    continue
+
+                action = str(
+                    payload.get('action') or payload.get('state') or ''
+                ).lower()
+
+                if action not in ('start', 'end', 'lost'):
+                    continue
+
+                slot = str(payload.get('slot', '')) if mode == 'DMR' else ''
+                key = (mode, slot)
+
+                if action == 'start':
+                    self.starts[key] = (
+                        payload, time.monotonic(), event_time(payload)
+                    )
+                    continue
+
                 start = self.starts.pop(key, None)
                 if not start:
-                    LOG.info('SKIP %s end without matching start', mode)
-                    return
+                    LOG.info('SKIP %s %s without matching start', mode, action)
+                    continue
+
                 begin, tick, started_at = start
                 if time.monotonic() - tick > 3600:
                     LOG.info('SKIP stale %s start', mode)
-                    return
+                    continue
+
                 self.process(mode, begin, payload, started_at)
+
         except Exception:
             LOG.exception('Failed to process MQTT message')
 
+    def process_fm(self, payload):
+        state = str(payload.get('state') or payload.get('action') or '').lower()
+        key = ('FM', '')
+
+        if state == 'relaying_rf':
+            if key not in self.starts:
+                self.starts[key] = (
+                    {'source': 'rf'}, time.monotonic(), event_time(payload)
+                )
+            return
+
+        if state == 'relaying_wait_rf':
+            start = self.starts.pop(key, None)
+            if not start:
+                return
+
+            begin, tick, started_at = start
+            duration = max(
+                0.0,
+                (event_time(payload) - started_at).total_seconds()
+            )
+
+            if duration > 3600:
+                return
+
+            self.process(
+                'FM',
+                begin,
+                {'duration': duration},
+                started_at
+            )
+
+        elif state == 'hang':
+            self.starts.pop(key, None)
+
     def process(self, mode, begin, end, started_at):
-        settings = telegram_load()  # reload each QSO so Admin changes apply without restart
+        settings = telegram_load()
         if not settings.get('enabled'):
             LOG.info('SKIP disabled')
             return
+
         if mode not in settings.get('modes', []):
             LOG.info('SKIP %s disabled mode', mode)
             return
+
         try:
             duration = float(end.get('duration', 0))
         except (TypeError, ValueError):
             duration = 0.0
+
         if duration <= float(settings.get('min_duration', 2)):
             LOG.info('SKIP %s short duration %.2fs', mode, duration)
             return
+
         source = str(begin.get('source', '')).lower()
         if source not in settings.get('sources', ['rf', 'network']):
             LOG.info('SKIP %s source %s', mode, source)
             return
+
+        talkgroup = None
+
         if mode == 'DMR':
-            caller = str(begin.get('src_info') or begin.get('src_id') or '').strip().upper()
+            caller = str(
+                begin.get('src_info') or begin.get('src_id') or ''
+            ).strip().upper()
+
             talkgroup = begin.get('dst_id')
+
             if not caller:
                 LOG.info('SKIP DMR missing caller')
                 return
+
             try:
                 tg = int(talkgroup)
             except (ValueError, TypeError):
                 LOG.info('SKIP DMR missing TG')
                 return
+
             excluded = settings.get('tg_exclude', [])
             included = settings.get('tg_include', [])
-            if tg in excluded or (settings.get('tg_policy') == 'only_included' and tg not in included):
+
+            if tg in excluded or (
+                settings.get('tg_policy') == 'only_included'
+                and tg not in included
+            ):
                 LOG.info('SKIP DMR TG filter: %s', tg)
                 return
+
+        elif mode == 'FM':
+            caller = ''
+
         else:
-            caller = str(begin.get('src_callsign') or '').strip().upper()
-            talkgroup = None
-            ext = str(begin.get('src_ext') or '').strip().upper()
-            if settings.get('exclude_time', True) and ext == 'TIME':
-                LOG.info('SKIP D-Star time signal')
-                return
-            if settings.get('exclude_beacons', True) and caller == self.callsign:
-                LOG.info('SKIP D-Star own repeater beacon')
-                return
+            caller = str(
+                begin.get('src_callsign')
+                or begin.get('src_info')
+                or begin.get('src_id')
+                or ''
+            ).strip().upper()
+
+            if mode == 'D-Star':
+                ext = str(begin.get('src_ext') or '').strip().upper()
+
+                if settings.get('exclude_time', True) and ext == 'TIME':
+                    LOG.info('SKIP D-Star time signal')
+                    return
+
+                if settings.get('exclude_beacons', True) and caller == self.callsign:
+                    LOG.info('SKIP D-Star own repeater beacon')
+                    return
+
             if not caller:
-                LOG.info('SKIP D-Star missing caller')
+                LOG.info('SKIP %s missing caller', mode)
                 return
-        if caller in [x.upper() for x in settings.get('callsign_exclude', [])]:
+
+        if caller and caller in [
+            x.upper() for x in settings.get('callsign_exclude', [])
+        ]:
             LOG.info('SKIP excluded callsign %s', caller)
             return
+
         gap = float(settings.get('notification_gap', 10))
         if time.monotonic() - self.last_notification < gap:
             LOG.info('SKIP rate limit')
             return
+
         title = '📡 ' + html.escape(self.callsign) + ' – Attività radio'
-        fields = [f'<b>{title}</b>', f'Modo: <b>{html.escape(mode)}</b>', f'Nominativo: <b>{html.escape(caller)}</b>']
+
+        fields = [
+            f'<b>{title}</b>',
+            f'Modo: <b>{html.escape(mode)}</b>'
+        ]
+
+        if caller:
+            fields.append(
+                f'Nominativo: <b>{html.escape(caller)}</b>'
+            )
+
         if mode == 'DMR':
-            fields.extend([f'DMR ID: {html.escape(str(begin.get("src_id", "")))}', f'TG: <b>{talkgroup}</b>', f'TS: {html.escape(str(begin.get("slot", "")))}'])
-        else:
-            fields.append('Reflector: ' + html.escape(str(begin.get('reflector', ''))))
-        fields.extend([f'Origine: {html.escape(source)}', f'Durata: {duration:.1f} s', 'UTC: ' + started_at.strftime('%Y-%m-%d %H:%M:%S')])
+            fields.extend([
+                f'DMR ID: {html.escape(str(begin.get("src_id", "")))}',
+                f'TG: <b>{html.escape(str(talkgroup))}</b>',
+                f'TS: {html.escape(str(begin.get("slot", "")))}'
+            ])
+
+        elif mode not in ('FM',):
+            reflector = str(begin.get('reflector') or '')
+            if reflector:
+                fields.append(
+                    'Reflector: ' + html.escape(reflector)
+                )
+
+        fields.extend([
+            f'Origine: {html.escape(source)}',
+            f'Durata: {duration:.1f} s',
+            'UTC: ' + started_at.strftime('%Y-%m-%d %H:%M:%S')
+        ])
+
         message = '\n'.join(fields)
+
         token = settings.get('bot_token', '')
         chat_id = settings.get('chat_id', '')
+
         if not token or not chat_id:
             LOG.warning('SKIP Telegram token/chat missing')
             return
+
         try:
             telegram_send(token, chat_id, message)
             self.last_notification = time.monotonic()
-            LOG.info('SENT %s %s', mode, caller)
+            LOG.info('SENT %s %s', mode, caller or 'RF')
         except (urllib.error.URLError, ValueError, RuntimeError) as exc:
             LOG.error('Telegram send failed: %s', type(exc).__name__)
 

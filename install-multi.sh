@@ -21,7 +21,7 @@ for f in backend/app.py backend/multi.py backend/multi_worker.py backend/mqtt_co
   [[ -f "$SRC/$f" ]] || fail "File mancante: $f"
 done
 [[ ! -e "$APP" && ! -L "$APP" ]] || fail "Directory installazione già presente: $APP"
-for unit in mmdvm-dashboard-multi mmdvm-multi-collector; do
+for unit in mmdvm-dashboard-multi mmdvm-multi-collector mmdvm-multi-telegram; do
   [[ ! -e /etc/systemd/system/$unit.service ]] || fail "Servizio già presente: $unit"
 done
 for path in /etc/apache2/sites-available/$SITE.conf /etc/apache2/ssl/$SITE /etc/mosquitto/conf.d/$SITE.conf /etc/mosquitto/$SITE.passwd; do
@@ -222,6 +222,29 @@ ReadWritePaths=$APP/data $APP/config $STATE
 [Install]
 WantedBy=multi-user.target
 UNIT
+cat > "/etc/systemd/system/mmdvm-multi-telegram.service" <<UNIT
+[Unit]
+Description=MMDVM Dashboard Multi Telegram Notifications
+Wants=network-online.target mosquitto.service
+After=network-online.target mosquitto.service
+[Service]
+Type=simple
+User=$USER_NAME
+Group=$USER_NAME
+WorkingDirectory=$APP/backend
+Environment=MMDVM_NODE_CONFIG=$APP/config/dashboard.ini
+Environment=MMDVM_NODE_DATA=$APP/data
+Environment=MMDVM_DASHBOARD_STATE_DIR=$STATE
+ExecStart=/usr/bin/python3 -u $APP/backend/telegram_bot.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=$APP/data $STATE
+[Install]
+WantedBy=multi-user.target
+UNIT
 info 'Validazione Apache e avvio servizi'
 a2enmod proxy proxy_http ssl >/dev/null
 a2ensite "$SITE" >/dev/null
@@ -229,13 +252,14 @@ apache2ctl configtest
 systemctl daemon-reload
 systemctl enable --now mosquitto
 systemctl restart mosquitto
-systemctl enable --now mmdvm-multi-collector.service mmdvm-dashboard-multi.service
+systemctl enable --now mmdvm-multi-collector.service mmdvm-dashboard-multi.service mmdvm-multi-telegram.service
 systemctl enable --now apache2
 systemctl reload apache2
 systemctl is-active --quiet mosquitto
 systemctl is-active --quiet apache2
 systemctl is-active --quiet mmdvm-dashboard-multi
 systemctl is-active --quiet mmdvm-multi-collector
+systemctl is-active --quiet mmdvm-multi-telegram
 info "Dashboard: https://$HTTPS_NAME/"
 info "Admin: https://$HTTPS_NAME/api/admin/"
 echo
