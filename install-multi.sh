@@ -145,6 +145,8 @@ p.write_text(json.dumps(config,indent=2)+'\n')
 p.chmod(0o644)
 PYRUNTIME
 install -d -o "$USER_NAME" -g "$USER_NAME" -m 0750 "$APP/data" "$APP/data/databases" "$STATE"
+# Keep the complete template available for future Multi repeater creation.
+install -o root -g "$USER_NAME" -m 0644 "$SRC/config/dashboard.ini.example" "$APP/config/dashboard.ini.example"
 install -o root -g "$USER_NAME" -m 0660 "$SRC/config/dashboard.ini.example" "$APP/config/dashboard.ini"
 # Do not copy live credentials, data, or backup files from the source tree.
 find "$APP/backend" "$APP/frontend" "$APP/admin" -type f \( -name '*.bak-*' -o -name '*.pyc' \) -delete

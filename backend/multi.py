@@ -166,24 +166,6 @@ class Registry:
     def delete(self, slug):
         if not isinstance(slug, str) or not SLUG.fullmatch(slug):
             raise ValueError('Invalid repeater')
-        agent_same_broker = data.get('agent_same_broker', True)
-        if not isinstance(agent_same_broker, bool):
-            raise ValueError('Invalid Agent same-broker setting')
-        agent_host = data.get('agent_host', host)
-        agent_port = data.get('agent_port', port)
-        agent_user = data.get('agent_username', '')
-        agent_password = data.get('agent_password', '')
-        agent_tls = data.get('agent_tls', False)
-        if not isinstance(agent_host, str) or not agent_host.strip() or len(agent_host) > 253 or any(ord(c) < 33 for c in agent_host):
-            raise ValueError('Invalid Agent MQTT host')
-        if isinstance(agent_port, bool) or not isinstance(agent_port, int) or not 1 <= agent_port <= 65535:
-            raise ValueError('Invalid Agent MQTT port')
-        if not isinstance(agent_user, str) or not isinstance(agent_password, str) or max(len(agent_user), len(agent_password)) > 1024 or any(ord(c) < 32 for c in agent_user + agent_password):
-            raise ValueError('Invalid Agent MQTT credentials')
-        if not isinstance(agent_tls, bool):
-            raise ValueError('Invalid Agent MQTT TLS')
-        if not agent_same_broker and agent_password and not agent_user:
-            raise ValueError('Agent MQTT username required when password is set')
         with self.lock, (self.directory / '.registry.lock').open('a+') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             records = self.records()
@@ -338,6 +320,24 @@ class Registry:
         tls = data.get('tls', False)
         if not isinstance(tls, bool):
             raise ValueError('Invalid TLS setting')
+        agent_same_broker = data.get('agent_same_broker', True)
+        if not isinstance(agent_same_broker, bool):
+            raise ValueError('Invalid Agent same-broker setting')
+        agent_host = data.get('agent_host', host)
+        agent_port = data.get('agent_port', port)
+        agent_user = data.get('agent_username', '')
+        agent_password = data.get('agent_password', '')
+        agent_tls = data.get('agent_tls', False)
+        if not isinstance(agent_host, str) or not agent_host.strip() or len(agent_host) > 253 or any(ord(c) < 33 for c in agent_host):
+            raise ValueError('Invalid Agent MQTT host')
+        if isinstance(agent_port, bool) or not isinstance(agent_port, int) or not 1 <= agent_port <= 65535:
+            raise ValueError('Invalid Agent MQTT port')
+        if not isinstance(agent_user, str) or not isinstance(agent_password, str) or max(len(agent_user), len(agent_password)) > 1024 or any(ord(c) < 32 for c in agent_user + agent_password):
+            raise ValueError('Invalid Agent MQTT credentials')
+        if not isinstance(agent_tls, bool):
+            raise ValueError('Invalid Agent MQTT TLS')
+        if not agent_same_broker and agent_password and not agent_user:
+            raise ValueError('Agent MQTT username required when password is set')
         with self.lock, (self.directory / '.registry.lock').open('a+') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             self.nodes = self.read()
@@ -363,9 +363,38 @@ class Registry:
                 for name in ('data', 'admin'):
                     (directory / name).mkdir(mode=0o700)
                 cfg = configparser.ConfigParser(interpolation=None)
-                cfg.read(BASE_DIR / 'config' / 'dashboard.ini.example')
-                if not cfg.has_section('deployment'):
-                    cfg.add_section('deployment')
+                template = BASE_DIR / 'config' / 'dashboard.ini.example'
+                if not template.is_file():
+                    raise ValueError('Template dashboard.ini.example mancante')
+                with template.open(encoding='utf-8') as handle:
+                    cfg.read_file(handle)
+                required = {
+                    'deployment': ('mode', 'node_id', 'agent_topic_prefix', 'mmdvm_ini'),
+                    'dashboard': ('language', 'title'),
+                    'repeater': ('callsign', 'location', 'city', 'locator', 'altitude',
+                                 'tx_frequency', 'rx_frequency', 'shift', 'power',
+                                 'ctcss', 'dmr_color_code'),
+                    'modes': (),
+                    'station': ('organization', 'organization_description',
+                                'maintainers', 'collaboration'),
+                    'hardware': ('radio', 'modem', 'computer', 'antenna'),
+                    'images': ('banner', 'repeater', 'logo'),
+                    'links': ('dstar_dashboard', 'dstar_dashboard_label',
+                              'mmdvmhost_url', 'mmdvmhost_label',
+                              'dmrgateway_url', 'dmrgateway_label',
+                              'ysfgateway_url', 'ysfgateway_label',
+                              'ircddbgateway_url', 'ircddbgateway_label',
+                              'm17gateway_url', 'm17gateway_label',
+                              'aprsgateway_url', 'aprsgateway_label'),
+                    'paths': ('mmdvm_dir', 'mmdvm_file', 'mmdvm_logs',
+                              'dmr_ids', 'tg_list_dir', 'tg_list_file'),
+                }
+                for section, keys in required.items():
+                    if not cfg.has_section(section):
+                        raise ValueError(f'Template incompleto: manca [{section}]')
+                    for key in keys:
+                        if not cfg.has_option(section, key):
+                            raise ValueError(f'Template incompleto: manca {section}.{key}')
                 cfg['deployment'].update(mode='remote', node_id=node_id, agent_topic_prefix=prefix)
                 with (directory / 'dashboard.ini').open('w') as handle:
                     cfg.write(handle)
