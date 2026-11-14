@@ -9,7 +9,7 @@ import tarfile
 import tempfile
 from pathlib import Path, PurePosixPath
 
-REPOSITORY = "Mauro-go/MMDVM-Dashboard-MQTT"
+from update_origin import get_repository
 VERSION_RE = re.compile(r"^v?[0-9]+\.[0-9]+\.[0-9]+$")
 
 COMPONENTS = {"backend", "frontend", "admin", "VERSION"}
@@ -49,7 +49,7 @@ def validate_version(version):
 def archive_url(version):
     version = validate_version(version)
     return (
-        f"https://github.com/{REPOSITORY}/"
+        f"https://github.com/{get_repository()}/"
         f"archive/refs/tags/{version}.tar.gz"
     )
 

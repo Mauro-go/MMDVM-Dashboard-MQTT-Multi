@@ -4,7 +4,8 @@
 set -Eeuo pipefail
 umask 077
 SRC="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-APP=/opt/mmdvm-dashboard-multi
+APP=${MMDVM_APP_ROOT:-/opt/mmdvm-dashboard-multi}
+[[ "$APP" == /* && "$APP" != / && "$APP" != *".."* && "$APP" != *$'\n'* ]] || { echo "Percorso APP non valido" >&2; exit 2; }
 STATE=/var/lib/mmdvm-dashboard-multi
 WEBROOT=/var/www/html
 USER_NAME=mmdvm-dashboard-multi
@@ -17,10 +18,18 @@ fail(){ echo "ERRORE: $*" >&2; exit 1; }
 info(){ echo "==> $*"; }
 [[ $EUID == 0 ]] || fail 'Eseguire come root.'
 [[ -f /etc/debian_version ]] || fail 'Richiesto Debian.'
+# Il canale è parte del pacchetto sorgente e resta persistente nell'installazione.
+[[ -f "$SRC/UPDATE_REPOSITORY" && ! -L "$SRC/UPDATE_REPOSITORY" ]] || fail 'UPDATE_REPOSITORY mancante o non valido'
+UPDATE_REPOSITORY=$(cat "$SRC/UPDATE_REPOSITORY")
+case "$UPDATE_REPOSITORY" in
+  Mauro-go/MMDVM-Dashboard-MQTT-Multi) ;;
+  *) fail "Repository di aggiornamento non autorizzato: $UPDATE_REPOSITORY" ;;
+esac
 for f in backend/app.py backend/multi.py backend/multi_worker.py backend/mqtt_collector.py backend/admin_api.py config/dashboard.ini.example frontend/index.html admin/multi.html; do
   [[ -f "$SRC/$f" ]] || fail "File mancante: $f"
 done
 [[ ! -e "$APP" && ! -L "$APP" ]] || fail "Directory installazione già presente: $APP"
+[[ "$APP" != "$SRC" ]] || fail "La directory APP non può essere quella dei sorgenti"
 for unit in mmdvm-dashboard-multi mmdvm-multi-collector mmdvm-multi-telegram; do
   [[ ! -e /etc/systemd/system/$unit.service ]] || fail "Servizio già presente: $unit"
 done
@@ -72,6 +81,7 @@ cat <<SUMMARY
 
 Riepilogo:
   App:       $APP
+  Aggiornamenti: $UPDATE_REPOSITORY
   Ripetitore: $CALLSIGN
   Agent ID:  $NODE_ID
   Agent:     $PREFIX
@@ -92,7 +102,48 @@ apt-get install -y apache2 openssl ca-certificates curl mosquitto mosquitto-clie
 id "$USER_NAME" >/dev/null 2>&1 || useradd --system --home "$APP" --shell /usr/sbin/nologin "$USER_NAME"
 install -d -o root -g root -m 0755 "$APP"
 for dir in backend frontend admin; do cp -a "$SRC/$dir" "$APP/$dir"; done
+install -o root -g root -m 0644 "$SRC/VERSION" "$APP/VERSION"
+# Install root-owned, isolated update worker. Never grant the web user root access.
+install -d -o root -g root -m 0755 "$APP/scripts"
+for f in "$SRC"/scripts/update_*.py; do
+  install -o root -g root -m 0644 "$f" "$APP/scripts/$(basename "$f")"
+done
+cat > /etc/systemd/system/mmdvm-multi-update.service <<UNIT
+[Unit]
+Description=MMDVM Dashboard Multi verified updater
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=$APP/scripts
+Environment=MMDVM_APP_ROOT=$APP
+ExecStart=/usr/bin/python3 $APP/scripts/update_worker.py
+TimeoutStartSec=600
+UMask=0077
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=$APP
+UNIT
+install -o root -g root -m 0644 "$SRC/systemd/mmdvm-multi-update.timer" /etc/systemd/system/mmdvm-multi-update.timer
+# Install shared DMR database updater.
+install -d -o root -g root -m 0755 "$APP/scripts"
+install -o root -g root -m 0755 "$SRC/scripts/update-dmr-ids.sh" "$APP/scripts/update-dmr-ids.sh"
+install -o root -g root -m 0644 "$SRC/systemd/mmdvm-dmr-ids-update@.service" /etc/systemd/system/mmdvm-dmr-ids-update@.service
+install -o root -g root -m 0644 "$SRC/systemd/mmdvm-dmr-ids-update@.timer" /etc/systemd/system/mmdvm-dmr-ids-update@.timer
 install -d -o root -g "$USER_NAME" -m 2770 "$APP/config"
+install -o root -g root -m 0644 "$SRC/UPDATE_REPOSITORY" "$APP/config/update-repository"
+APP="$APP" PORT="$PORT" python3 - <<'PYRUNTIME'
+import json, os
+from pathlib import Path
+app=Path(os.environ['APP'])
+config={'mode':'multi','port':int(os.environ['PORT']), 'services':['mmdvm-dashboard-multi.service','mmdvm-multi-collector.service','mmdvm-multi-telegram.service']}
+p=app/'config/update-runtime.json'
+p.write_text(json.dumps(config,indent=2)+'\n')
+p.chmod(0o644)
+PYRUNTIME
 install -d -o "$USER_NAME" -g "$USER_NAME" -m 0750 "$APP/data" "$APP/data/databases" "$STATE"
 install -o root -g "$USER_NAME" -m 0660 "$SRC/config/dashboard.ini.example" "$APP/config/dashboard.ini"
 # Do not copy live credentials, data, or backup files from the source tree.
@@ -124,6 +175,10 @@ chmod 0660 "$APP/config/dashboard.ini"
 printf 'MODE,TS,TG,LABEL,URL\nDMR,1,222,BM-IT,\n' > "$APP/data/databases/TG_List.csv"
 chown "$USER_NAME:$USER_NAME" "$APP/data/databases/TG_List.csv"
 chmod 0640 "$APP/data/databases/TG_List.csv"
+# Download DMR database before starting dashboard services.
+if [[ ! -s "$APP/data/databases/DMRIds.dat" ]]; then
+  "$APP/scripts/update-dmr-ids.sh" "$APP" || fail "Download iniziale database DMR fallito"
+fi
 openssl rand -hex 32 > "$STATE/session-secret"
 openssl rand -hex 24 > "$STATE/setup-token"
 chown -R "$USER_NAME:$USER_NAME" "$STATE"
@@ -250,6 +305,7 @@ a2enmod proxy proxy_http ssl >/dev/null
 a2ensite "$SITE" >/dev/null
 apache2ctl configtest
 systemctl daemon-reload
+
 systemctl enable --now mosquitto
 systemctl restart mosquitto
 systemctl enable --now mmdvm-multi-collector.service mmdvm-dashboard-multi.service mmdvm-multi-telegram.service
@@ -260,6 +316,8 @@ systemctl is-active --quiet apache2
 systemctl is-active --quiet mmdvm-dashboard-multi
 systemctl is-active --quiet mmdvm-multi-collector
 systemctl is-active --quiet mmdvm-multi-telegram
+systemctl enable --now "mmdvm-dmr-ids-update@$(basename "$APP").timer"
+systemctl enable --now mmdvm-multi-update.timer
 info "Dashboard: https://$HTTPS_NAME/"
 info "Admin: https://$HTTPS_NAME/api/admin/"
 echo

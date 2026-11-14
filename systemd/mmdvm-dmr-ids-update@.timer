@@ -1,0 +1,11 @@
+[Unit]
+Description=Aggiornamento settimanale database ID DMR per %i
+
+[Timer]
+OnCalendar=weekly
+Persistent=true
+RandomizedDelaySec=1h
+Unit=mmdvm-dmr-ids-update@%i.service
+
+[Install]
+WantedBy=timers.target

@@ -15,8 +15,9 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FRONTEND_DIR = os.path.join(BASE_DIR, "frontend")
 
 sys.path.insert(0, os.path.join(BASE_DIR, "backend"))
-from parser import load_live, get_repeater_callsign
+from parser import load_live, get_repeater_callsign, get_operator_name, get_dmr_ids
 from mqtt_sessions import reconstruct, dt
+from dstar_reflector import resolve_dstar_reflector_at
 from datetime import datetime, timezone
 
 app = Flask(__name__)
@@ -156,6 +157,262 @@ def api_services():
 
     return jsonify(services)
 
+
+
+@app.route("/api/gateway-links")
+def api_gateway_links():
+    """Return gateway events and connection evidence for the current node."""
+    import sqlite3
+    from datetime import datetime, timezone
+    from node_paths import data_file
+
+    gateways = (
+        "dmrgateway", "ysfgateway",
+        "dstargateway", "aprsgateway",
+    )
+
+    def parse_time(value):
+        if not value:
+            return None
+        try:
+            dt = datetime.fromisoformat(
+                str(value).replace("Z", "+00:00")
+            )
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except (ValueError, TypeError):
+            return None
+
+    results = {
+        name: {
+            "gateway": name,
+            "action": "",
+            "target": "",
+            "reason": "",
+            "event_timestamp": None,
+            "received_at": None,
+            "fresh": False,
+            "state": "unknown",
+            "status_message": "",
+            "status_timestamp": None,
+            "verified": False,
+        }
+        for name in gateways
+    }
+
+    # Remote mode: Agent handles non-DMR gateways.
+    # DMR connections are read separately from MQTT SQLite state.
+    if remote_agent.enabled():
+        snapshot = remote_agent.snapshot()
+        online = snapshot.get("online") is True
+        telemetry = snapshot.get("telemetry", {}) if online else {}
+        source = telemetry.get("gateways", {})
+        remote_results = []
+
+        for name in gateways:
+            if name == "dmrgateway":
+                continue
+
+            gateway_data = source.get(name, {})
+            if not isinstance(gateway_data, dict):
+                gateway_data = {}
+
+            service = gateway_data.get("service", "unknown")
+            connections = gateway_data.get("connections", {})
+            if not isinstance(connections, dict):
+                connections = {}
+
+            if not connections:
+                remote_results.append({
+                    **results[name],
+                    "service_state": service,
+                })
+                continue
+
+            for target, info in connections.items():
+                if not isinstance(info, dict):
+                    continue
+
+                raw_state = info.get("state", "unknown")
+                available = online and service == "active"
+
+                # Preserve the last observed state while the Agent
+                # and gateway service are available.
+                if not available:
+                    state = "unknown"
+                elif raw_state == "connected":
+                    state = "connected"
+                elif raw_state == "disconnected":
+                    state = "disconnected"
+                elif raw_state in ("linking", "connecting"):
+                    state = "connecting"
+                else:
+                    state = "unknown"
+
+                is_fresh = available
+                verified = available and state == "connected"
+
+                event_time = info.get("timestamp")
+                remote_results.append({
+                    "gateway": name,
+                    "action": raw_state,
+                    "target": str(target),
+                    "reason": "",
+                    "event_timestamp": event_time,
+                    "received_at": None,
+                    "fresh": is_fresh,
+                    "state": state,
+                    "status_message": info.get("message", "") if verified else "",
+                    "status_timestamp": event_time if verified else None,
+                    "verified": verified,
+                    "service_state": service,
+                })
+
+        service = source.get("dmrgateway", {}).get("service", "unknown")
+        db_path = data_file("events.sqlite3")
+        dmr_rows = []
+
+        if db_path.exists():
+            try:
+                with sqlite3.connect(str(db_path), timeout=5) as con:
+                    dmr_rows = con.execute("""
+                        SELECT target, state, action, reason,
+                               event_timestamp, received_at,
+                               status_message, status_timestamp
+                        FROM gateway_connections
+                        WHERE gateway = 'dmrgateway'
+                        ORDER BY target
+                    """).fetchall()
+            except sqlite3.Error:
+                app.logger.exception("Unable to read DMR connections")
+
+        for (target, stored_state, action, reason,
+             timestamp, received, message, status_timestamp) in dmr_rows:
+
+            available = online and service == "active"
+            state = stored_state if available else "unknown"
+
+            # Last observed MQTT state, not a live connection probe.
+            # "fresh" indicates the gateway service is currently available,
+            # not that the network event is recent.
+            last_observed = state == "connected"
+
+            remote_results.append({
+                "gateway": "dmrgateway",
+                "action": action,
+                "target": target,
+                "reason": reason,
+                "event_timestamp": timestamp,
+                "received_at": received,
+                "fresh": available,
+                "state": state,
+                "status_message": message,
+                "status_timestamp": status_timestamp,
+                "verified": False,
+                "last_observed_connected": last_observed,
+                "service_state": service,
+            })
+
+        if not dmr_rows:
+            remote_results.append({
+                **results["dmrgateway"],
+                "service_state": service,
+            })
+
+        return jsonify(remote_results)
+
+    db_path = data_file("events.sqlite3")
+    if not db_path.exists():
+        return jsonify(list(results.values()))
+
+    try:
+        with sqlite3.connect(str(db_path), timeout=5) as con:
+            links = con.execute("""
+                SELECT gateway, action, target, reason,
+                       event_timestamp, received_at
+                FROM gateway_links
+            """).fetchall()
+
+            statuses = con.execute("""
+                SELECT gateway, message, event_timestamp
+                FROM gateway_status
+            """).fetchall()
+
+    except sqlite3.Error:
+        app.logger.exception("Unable to read gateway events")
+        return jsonify(list(results.values()))
+
+    now = datetime.now(timezone.utc)
+
+    for gateway, action, target, reason, timestamp, received in links:
+        if gateway not in results:
+            continue
+
+        action = str(action or "").lower()
+        event_time = parse_time(timestamp)
+
+        fresh = False
+        if event_time:
+            age = (now - event_time).total_seconds()
+            fresh = 0 <= age <= 120
+
+        state = "unknown"
+
+        if action in ("failed", "unlinked", "disconnected"):
+            state = "disconnected" if fresh else "unknown"
+        elif action in ("linking", "relinking", "connecting"):
+            state = "connecting" if fresh else "unknown"
+        elif action in ("linked", "connected"):
+            state = "connected" if fresh else "unknown"
+
+        results[gateway].update({
+            "action": action,
+            "target": target or "",
+            "reason": reason or "",
+            "event_timestamp": timestamp,
+            "received_at": received,
+            "fresh": fresh,
+            "state": state,
+        })
+
+    for gateway, message, timestamp in statuses:
+        if gateway not in results:
+            continue
+
+        message = str(message or "")
+        results[gateway]["status_message"] = message
+        results[gateway]["status_timestamp"] = timestamp
+
+        if gateway != "dmrgateway":
+            continue
+
+        prefix = "Logged into DMR Network:"
+        if not message.startswith(prefix):
+            continue
+
+        status_time = parse_time(timestamp)
+        link_time = parse_time(
+            results[gateway]["event_timestamp"]
+        )
+
+        if not status_time:
+            continue
+
+        # A later failure or unlink must override an older login.
+        if link_time and status_time < link_time:
+            continue
+
+        network = message[len(prefix):].strip()
+        if network:
+            results[gateway]["target"] = network
+
+        # This confirms a successful login at the event timestamp.
+        # It is not a live heartbeat proving the link is still active.
+        results[gateway]["state"] = "connected"
+        results[gateway]["verified"] = True
+
+    return jsonify(list(results.values()))
 
 def read_mmdvm_modes():
     if remote_agent.enabled():
@@ -323,6 +580,23 @@ def api_status():
 @app.route("/api/heard")
 def api_heard():
     history, active, fm = reconstruct()
+    dmr_ids = get_dmr_ids()
+
+    for event in history:
+        if event.get("mode") not in ("DMR", "D-Star", "YSF"):
+            continue
+
+        callsign = str(event.get("callsign") or "").strip()
+
+        if event.get("mode") == "DMR":
+            radio_id = str(event.get("source") or "").strip()
+            entry = dmr_ids.get(radio_id, {})
+            if not callsign:
+                callsign = entry.get("callsign", "")
+                event["callsign"] = callsign
+
+        event["name"] = get_operator_name(callsign)
+
     return jsonify(history)
 
 
@@ -365,7 +639,7 @@ def api_live():
                 or ""
             )
 
-        candidates.append({
+        candidate = {
             "active": True,
             "mode": mode,
             "callsign": callsign,
@@ -376,7 +650,16 @@ def api_live():
             "slot": slot,
             "elapsed": round(elapsed, 1),
             "_started": start_dt,
-        })
+        }
+
+        if mode == "D-Star":
+            candidate["reflector"] = resolve_dstar_reflector_at(
+                source=payload.get("source"),
+                timestamp=started,
+                reflector=payload.get("reflector"),
+            )
+
+        candidates.append(candidate)
 
     if fm is not None:
         start_dt = dt(fm)

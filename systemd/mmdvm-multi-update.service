@@ -1,0 +1,16 @@
+[Unit]
+Description=MMDVM Dashboard Multi verified updater
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/usr/local/lib/mmdvm-multi-updater
+ExecStart=/usr/bin/python3 /usr/local/lib/mmdvm-multi-updater/update_worker.py
+TimeoutStartSec=600
+UMask=0077
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/opt/mmdvm-dashboard-multi /var/lib/mmdvm-dashboard-updates

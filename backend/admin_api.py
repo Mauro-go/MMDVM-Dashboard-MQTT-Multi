@@ -467,6 +467,69 @@ def admin_check_updates():
         })
 
 
+
+@admin_bp.route("/updates/install", methods=["POST"])
+def admin_request_update():
+    """Queue only the latest stable version. A separate root timer processes it."""
+    failure = _require_auth()
+    if failure:
+        return failure
+    failure = _require_csrf()
+    if failure:
+        return failure
+    if not _same_origin():
+        return _reply("Invalid request origin", 403)
+    if request.content_length is None or request.content_length > 1024:
+        return _reply("Invalid request size", 413)
+    data = _json()
+    if data is None or set(data) != {"version"}:
+        return _reply("Invalid update request", 400)
+    import re
+    version = data.get("version")
+    if not isinstance(version, str) or not re.fullmatch(r"v?[0-9]+\.[0-9]+\.[0-9]+", version):
+        return _reply("Invalid release version", 400)
+    try:
+        from update_checker import check_updates
+        from node_paths import data_file
+        import tempfile
+        info = check_updates()
+        if info.get("status") != "update_available" or info.get("latest") != version:
+            return _reply("No matching stable update available", 409)
+        target = data_file("update-request.json")
+        if target.is_symlink():
+            return _reply("Invalid request path", 400)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode="w", dir=target.parent, prefix=".update-request-", delete=False) as stream:
+            temporary = Path(stream.name)
+            os.chmod(temporary, 0o600)
+            json.dump({"version": version}, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+        return jsonify({"ok": True, "queued": version})
+    except Exception:
+        current_app.logger.exception("Unable to queue update")
+        return _reply("Unable to queue update", 500)
+
+@admin_bp.route("/updates/progress", methods=["GET"])
+def admin_update_progress():
+    failure = _require_auth()
+    if failure:
+        return failure
+    try:
+        from node_paths import data_file
+        path = data_file("update-result.json")
+        request_path = data_file("update-request.json")
+        if request_path.is_file() and not request_path.is_symlink():
+            return jsonify({"ok": True, "progress": {"state": "queued", "detail": "Aggiornamento in attesa del servizio updater"}})
+        if not path.is_file() or path.is_symlink():
+            return jsonify({"ok": True, "progress": {"state": "idle"}})
+        if path.stat().st_size > 4096:
+            raise ValueError("Invalid result size")
+        return jsonify({"ok": True, "progress": json.loads(path.read_text())})
+    except Exception:
+        return _reply("Unable to read update status", 500)
+
 @admin_bp.route("/config", methods=["GET"])
 def admin_read_config():
     """Restituisce i percorsi soltanto all'amministratore."""

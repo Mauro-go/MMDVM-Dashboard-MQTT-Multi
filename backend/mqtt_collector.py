@@ -11,7 +11,7 @@ import time
 from datetime import datetime, timezone
 
 import paho.mqtt.client as mqtt
-from mqtt_store import connect, save
+from mqtt_store import connect, save, init_gateway_links, save_gateway_link, save_gateway_connection, save_dstar_link_history
 from mqtt_settings import SETTINGS, load
 import remote_agent
 from multi_mqtt import accept_event
@@ -43,6 +43,17 @@ def cleanup_old_events(db):
 
 def on_message(client, userdata, msg):
     try:
+        gateway_topics = userdata.get("gateway_topics", {})
+        gateway = gateway_topics.get(msg.topic)
+        if gateway:
+            event = json.loads(msg.payload.decode("utf-8"))
+            if isinstance(event, dict):
+                save_gateway_link(userdata["db"], gateway, event)
+                save_gateway_connection(userdata["db"], gateway, event)
+                if gateway == "dstargateway":
+                    save_dstar_link_history(userdata["db"], gateway, event)
+            return
+
         if remote_agent.ingest(msg.topic, msg.payload):
             return
         event = json.loads(msg.payload.decode("utf-8"))
@@ -63,6 +74,7 @@ def on_message(client, userdata, msg):
 
 def main():
     db = connect()
+    init_gateway_links(db)
     client = None
     current = None
     retry_at = 0
@@ -120,22 +132,45 @@ def main():
                         pass
                     client = None
                 try:
-                    new_client = mqtt.Client(userdata={"db": db})
+                    # GATEWAY_TOPICS_V1
+                    topic = settings["topic"]
+                    gateway_topics = {}
+                    if topic.endswith("/json") and "+" not in topic and "#" not in topic:
+                        base = topic[:-5]
+                        gateway_topics = {
+                            f"{base}/{name}/json": name
+                            for name in (
+                                "dmrgateway",
+                                "ysfgateway",
+                                "dstargateway",
+                                "aprsgateway",
+                            )
+                        }
+
+                    new_client = mqtt.Client(userdata={
+                        "db": db,
+                        "gateway_topics": gateway_topics,
+                    })
                     new_client.on_message = on_message
                     new_client.on_subscribe = lambda *args: logger.info("MQTT subscription active (pid=%s)", os.getpid())
                     # COLLECTOR_CALLBACK_SNAPSHOT_V1
                     subscribed_topic = settings["topic"]
+                    subscribed_gateways = tuple(gateway_topics)
                     subscribed_agent = agent_enabled
                     subscribed_prefix = agent_prefix
 
                     def connected(
                         c, userdata, flags, rc,
                         subscribed_topic=subscribed_topic,
+                        subscribed_gateways=subscribed_gateways,
                         subscribed_agent=subscribed_agent,
                         subscribed_prefix=subscribed_prefix
                     ):
                         if rc == 0:
                             c.subscribe(subscribed_topic, qos=0)
+                            for gateway_topic in subscribed_gateways:
+                                c.subscribe(gateway_topic, qos=0)
+                                logger.info("Subscribed gateway: %s", gateway_topic)
                             if subscribed_agent:
                                 c.subscribe(subscribed_prefix + "/#", qos=1)
                                 logger.info("Subscribed Agent: %s/#", subscribed_prefix)

@@ -15,13 +15,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 COMPONENTS = ("backend", "frontend", "admin", "VERSION")
-BASE = Path("/var/lib/mmdvm-dashboard-updates")
-DESTINATION = Path("/opt/MMDVM-Dashboard-MQTT-Multi")
-SERVICES = (
-    "mmdvm-dashboard-multi.service",
-    "mmdvm-multi-collector.service",
-)
-HEALTH_URL = "http://127.0.0.1:8090/"
+from update_runtime import app_root, base, metadata
+BASE = base()
+DESTINATION = app_root()
+SERVICES = tuple(metadata()["services"])
+HEALTH_URL = "http://127.0.0.1:%d/" % metadata()["port"]
 
 
 def run_systemctl(action, service):

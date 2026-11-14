@@ -661,6 +661,17 @@ html,body {
         </div>
     </div>
 
+
+    <!-- GATEWAY CONNECTIONS -->
+    <div class="section-title" id="gatewayLinksTitle">
+        Gateway Connections
+    </div>
+    <div class="services-grid" id="gatewayLinksGrid">
+        <div class="service-card">
+            <div class="service-name">Loading...</div>
+        </div>
+    </div>
+
     <div class="ari-card">
 
         <div class="ari-logo">
@@ -957,8 +968,126 @@ async function loadSystemServices() {
 }
 
 
-loadAboutConfig().then(loadSystemServices);
+
+// Gateway MQTT events; independent from systemd service status.
+async function loadGatewayLinks() {
+    const grid = document.getElementById("gatewayLinksGrid");
+    if (!grid) return;
+
+    const italian = (document.documentElement.lang || "").toLowerCase()
+        .startsWith("it");
+
+    const labels = italian ? {
+        title: "Collegamenti Gateway",
+        connected: "Login confermato",
+        disconnected: "Ultimo evento: scollegato",
+        connecting: "Collegamento in corso",
+        unknown: "Stato non verificato",
+        noEvent: "Nessun evento",
+        lastEvent: "Ultimo evento",
+        confirmation: "Ultima conferma",
+        error: "Errore lettura gateway"
+    } : {
+        title: "Gateway Connections",
+        connected: "Login confirmed",
+        disconnected: "Last event: disconnected",
+        connecting: "Connecting",
+        unknown: "Status not verified",
+        noEvent: "No event",
+        lastEvent: "Last event",
+        confirmation: "Last confirmation",
+        error: "Gateway read error"
+    };
+
+    document.getElementById("gatewayLinksTitle").textContent =
+        labels.title;
+
+    const names = {
+        dmrgateway: "DMRGateway",
+        ysfgateway: "YSFGateway",
+        dstargateway: "DStarGateway",
+        aprsgateway: "APRSGateway"
+    };
+
+    function formatTime(value) {
+        if (!value) return "";
+        const date = new Date(value);
+        return Number.isNaN(date.getTime()) ? ""
+            : date.toLocaleString(italian ? "it-IT" : "en-GB");
+    }
+
+    try {
+        const response = await fetch("/api/gateway-links", {
+            cache: "no-store"
+        });
+        if (!response.ok) throw new Error("HTTP " + response.status);
+
+        const gateways = await response.json();
+        if (!Array.isArray(gateways)) throw new Error("Invalid response");
+
+        grid.replaceChildren();
+
+        for (const gateway of gateways) {
+            const card = document.createElement("div");
+            card.className = "service-card";
+
+            const details = document.createElement("div");
+            details.style.minWidth = "0";
+
+            const name = document.createElement("div");
+            name.className = "service-name";
+            name.textContent = names[gateway.gateway] || gateway.gateway;
+
+            const target = document.createElement("div");
+            target.className = "service-unit";
+            target.textContent = gateway.target || "—";
+
+            const status = document.createElement("div");
+            const state = gateway.state || "unknown";
+
+            let visual = "unknown";
+            let statusLabel = labels.unknown;
+
+            if (gateway.gateway === "dmrgateway" &&
+                gateway.last_observed_connected === true &&
+                state === "connected") {
+                visual = "running";
+                statusLabel = labels.connected;
+            } else if (gateway.gateway === "dmrgateway" &&
+                       state === "disconnected") {
+                visual = "stopped";
+                statusLabel = labels.disconnected;
+            } else if (gateway.verified && state === "connected") {
+                visual = "running";
+                statusLabel = labels.connected;
+            } else if (state === "disconnected") {
+                visual = "stopped";
+                statusLabel = labels.disconnected;
+            } else if (state === "connecting" && gateway.fresh) {
+                statusLabel = labels.connecting;
+            }
+
+            status.className = "service-status " + visual;
+            status.textContent = "● " + statusLabel;
+
+            details.append(name, target);
+
+            card.append(details, status);
+            grid.appendChild(card);
+        }
+    } catch (error) {
+        grid.textContent = labels.error;
+        console.error("Gateway links:", error);
+    }
+}
+
+
+loadAboutConfig().then(() => {
+    loadSystemServices();
+    loadGatewayLinks();
+});
 setInterval(loadSystemServices, 10000);
+setInterval(loadGatewayLinks, 10000);
 </script>
 
 </body>

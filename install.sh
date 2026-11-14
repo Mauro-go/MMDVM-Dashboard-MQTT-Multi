@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # MMDVM Dashboard MQTT - bilingual clean installer
-# Intended for NEW installations only. Never alters MMDVMHost or existing Apache vhosts.
+# Supports fresh installations and confirmed reinstallation. Never alters MMDVMHost or existing Apache vhosts.
 set -Eeuo pipefail
 umask 077
 
-APP=/opt/mmdvm-dashboard-mqtt
+APP=${MMDVM_APP_ROOT:-/opt/mmdvm-dashboard-mqtt}
 STATE=/var/lib/mmdvm-dashboard
 SERVICE_USER=mmdvm-dashboard
 WEBROOT=/var/www/html
 SRC="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+[[ "$APP" == /* && "$APP" != / ]] || { echo "Invalid APP" >&2; exit 2; }
 
 echo "MMDVM Dashboard MQTT"
 echo "1) English (default)"
@@ -33,13 +34,20 @@ command -v systemctl >/dev/null && command -v apt-get >/dev/null || die "systemd
 for file in backend/app.py backend/mqtt_collector.py backend/telegram_bot.py backend/telegram_settings.py backend/admin_api.py config/dashboard.ini.example frontend/index.html scripts/setup-https.sh; do
   [[ -f "$SRC/$file" ]] || die "Missing source: $file" "File sorgente mancante: $file"
 done
-[[ ! -e $APP ]] || die "Existing installation found. Aborting." "Installazione esistente. Operazione annullata."
-for unit in mmdvm-dashboard-mqtt mmdvm-mqtt-collector mmdvm-telegram-bot; do
-  [[ ! -e /etc/systemd/system/$unit.service ]] || die "Existing service: $unit" "Servizio esistente: $unit"
-done
-for conf in /etc/apache2/conf-available/mmdvm-dashboard-mqtt-api.conf; do
-  [[ ! -e $conf && ! -L $conf ]] || die "Existing Apache config: $conf" "Configurazione Apache esistente: $conf"
-done
+# An interrupted first installation can leave APP and/or service units behind.
+REINSTALL=false
+if [[ -e $APP || -e /etc/systemd/system/mmdvm-dashboard-mqtt.service ||
+      -e /etc/systemd/system/mmdvm-mqtt-collector.service ||
+      -e /etc/systemd/system/mmdvm-telegram-bot.service ||
+      -e /etc/apache2/conf-available/mmdvm-dashboard-mqtt-api.conf ]]; then
+  msg 'Existing or partial installation detected.' 'Installazione esistente o parziale rilevata.'
+  ask 'Overwrite application files, preserving settings and data? [y/N]: ' \
+      'Sovrascrivere i file applicativi conservando configurazioni e dati? [s/N]: '
+  case "${ANSWER:-}" in
+    y|Y|s|S) REINSTALL=true ;;
+    *) die 'Installation cancelled.' 'Installazione annullata.' ;;
+  esac
+fi
 if command -v apache2ctl >/dev/null; then
   msg "Apache is already installed; existing websites will be preserved." "Apache è già installato; i siti esistenti saranno preservati."
 else
@@ -180,10 +188,12 @@ HTTPS_NAME=$ANSWER
 # The active Apache site keeps its own DocumentRoot and HTTPS configuration.
 # Add ONLY /api/ proxy rules, without creating another listener or vhost.
 if command -v ss >/dev/null; then
-  [[ -z $(ss -H -ltn "sport = :8089") ]] || die "Backend port 8089 is in use." "Porta backend 8089 occupata."
+  if [[ $REINSTALL != true ]]; then
+    [[ -z $(ss -H -ltn "sport = :8089") ]] || die "Backend port 8089 is in use." "Porta backend 8089 occupata."
+  fi
 fi
 if [[ -d /etc/apache2 ]]; then
-  if grep -RIEq '^[[:space:]]*(ProxyPass|Alias|Redirect|<Location)[[:space:]]+["'\''"]?/api(/|["'\''"]|[[:space:]>])' /etc/apache2/sites-enabled /etc/apache2/conf-enabled 2>/dev/null; then
+  if [[ $REINSTALL != true ]] && grep -RIEq '^[[:space:]]*(ProxyPass|Alias|Redirect|<Location)[[:space:]]+["'\''"]?/api(/|["'\''"]|[[:space:]>])' /etc/apache2/sites-enabled /etc/apache2/conf-enabled 2>/dev/null; then
     die "Apache already defines /api/. Review its configuration manually." "Apache gestisce già /api/. Controlla manualmente la configurazione."
   fi
 fi
@@ -265,7 +275,35 @@ MOSQ
 fi
 
 id "$SERVICE_USER" >/dev/null 2>&1 || useradd --system --home "$APP" --shell /usr/sbin/nologin "$SERVICE_USER"
+# Install shared DMR database updater.
+install -d -o root -g root -m 0755 "$APP/scripts"
+install -o root -g root -m 0755 "$SRC/scripts/update-dmr-ids.sh" "$APP/scripts/update-dmr-ids.sh"
+install -o root -g root -m 0644 "$SRC/systemd/mmdvm-dmr-ids-update@.service" /etc/systemd/system/mmdvm-dmr-ids-update@.service
+install -o root -g root -m 0644 "$SRC/systemd/mmdvm-dmr-ids-update@.timer" /etc/systemd/system/mmdvm-dmr-ids-update@.timer
 install -d -o root -g "$SERVICE_USER" -m 2770 "$APP/config"
+# Il canale di aggiornamento proviene dal pacchetto, mai dal nome della cartella.
+[[ -f "$SRC/UPDATE_REPOSITORY" && ! -L "$SRC/UPDATE_REPOSITORY" ]] || die 'Missing UPDATE_REPOSITORY' 'UPDATE_REPOSITORY mancante'
+UPDATE_REPOSITORY=$(cat "$SRC/UPDATE_REPOSITORY")
+case "$UPDATE_REPOSITORY" in
+  Mauro-go/MMDVM-Dashboard-MQTT-Multi) ;;
+  *) die 'Invalid update repository' 'Repository aggiornamenti non valido' ;;
+esac
+if [[ -f "$APP/config/update-repository" ]]; then
+  [[ $(cat "$APP/config/update-repository") == "$UPDATE_REPOSITORY" ]] || die     'Existing installation belongs to a different update channel.'     'Installazione esistente associata a un altro canale di aggiornamento.'
+else
+  install -o root -g root -m 0644 "$SRC/UPDATE_REPOSITORY" "$APP/config/update-repository"
+fi
+# Metadati dell'installazione per eventuali componenti updater Multi.
+if [[ ! -e "$APP/config/update-runtime.json" ]]; then
+  APP="$APP" python3 - <<'PYRUNTIME'
+import json,os
+from pathlib import Path
+p=Path(os.environ['APP'])/'config/update-runtime.json'
+p.write_text(json.dumps({'mode':'standard','port':8089,'services':['mmdvm-dashboard-mqtt.service','mmdvm-mqtt-collector.service','mmdvm-telegram-bot.service']},indent=2)+'\n')
+p.chmod(0o644)
+PYRUNTIME
+fi
+
 install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0750 "$APP/data" "$STATE"
 install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0750 "$APP/data/databases"
 for dir in backend frontend admin; do cp -a "$SRC/$dir" "$APP/"; done
@@ -273,8 +311,17 @@ install -o root -g root -m 0644 "$SRC/VERSION" "$APP/VERSION"
 chown -R root:root "$APP/backend" "$APP/frontend" "$APP/admin"
 find "$APP/backend" "$APP/frontend" "$APP/admin" -type d -exec chmod 0755 {} +
 find "$APP/backend" "$APP/frontend" "$APP/admin" -type f -exec chmod 0644 {} +
-install -o root -g "$SERVICE_USER" -m 0660 "$SRC/config/dashboard.ini.example" "$APP/config/dashboard.ini"
+# Preserve the real dashboard configuration on reinstall (including partial installs).
+if [[ ! -f "$APP/config/dashboard.ini" ]]; then
+  install -o root -g "$SERVICE_USER" -m 0660 "$SRC/config/dashboard.ini.example" "$APP/config/dashboard.ini"
+  CONFIG_CREATED=true
+else
+  CONFIG_CREATED=false
+  msg 'Existing dashboard.ini preserved.' 'dashboard.ini esistente conservato.'
+fi
 
+if [[ ! -e "$APP/data/mqtt-settings.json" ]]; then
+if [[ $CONFIG_CREATED == false ]]; then cp -p -- "$APP/config/dashboard.ini" "$APP/config/dashboard.ini.preserve-tmp"; fi
 APP="$APP" CALLSIGN="$CALLSIGN" HOST="$HOST" MQTT_PORT="$MQTT_PORT" TOPIC="$TOPIC" MMDVM_INI="$MMDVM_INI" DEPLOYMENT_MODE="$DEPLOYMENT_MODE" NODE_ID="$NODE_ID" AGENT_PREFIX="$AGENT_PREFIX" MQTT_USER="$MQTT_USER" MQTT_TLS="$MQTT_TLS" MQTT_SECRET_FILE="$MQTT_SECRET_FILE" python3 - <<'PYSET'
 import os, json, configparser
 from pathlib import Path
@@ -301,9 +348,17 @@ q = root/'data/mqtt-settings.json'
 q.write_text(json.dumps(dict(host=os.environ['HOST'], port=int(os.environ['MQTT_PORT']), topic=os.environ['TOPIC'], username=os.environ['MQTT_USER'], password=Path(os.environ['MQTT_SECRET_FILE']).read_text(), tls=os.environ['MQTT_TLS']=='true'), indent=2)+'\n')
 q.chmod(0o600)
 PYSET
+if [[ $CONFIG_CREATED == false ]]; then
+  mv -f -- "$APP/config/dashboard.ini.preserve-tmp" "$APP/config/dashboard.ini"
+fi
+else
+  msg 'Existing configuration and MQTT credentials preserved.' 'Configurazione e credenziali MQTT esistenti conservate.'
+fi
 chown root:"$SERVICE_USER" "$APP/config/dashboard.ini"
 chmod 0660 "$APP/config/dashboard.ini"
-chown "$SERVICE_USER:$SERVICE_USER" "$APP/data/mqtt-settings.json"
+if [[ -f "$APP/data/mqtt-settings.json" ]]; then
+  chown "$SERVICE_USER:$SERVICE_USER" "$APP/data/mqtt-settings.json"
+fi
 rm -f -- "$MQTT_SECRET_FILE" "${MOSQ_PASSWD_TMP:-}"
 MQTT_SECRET_FILE=
 MOSQ_PASSWD_TMP=
@@ -322,22 +377,9 @@ fi
 
 # DMRIds.dat format: numeric ID, callsign, optional name (whitespace-separated).
 # Download into a temporary file, validate it, and publish atomically.
-# Source is an independent community mirror; never overwrite existing database.
+# Preserve an existing database during installation; weekly updates replace it after validation.
 if [[ ! -s "$DMR_IDS" ]]; then
-  DMR_URL=https://raw.githubusercontent.com/DMR-Database/database-beta/master/DMRIds.dat
-  DMR_TMP=$(mktemp "$DB_DIR/.dmrids.XXXXXXXX")
-  if curl --fail --location --silent --show-error --retry 2 --connect-timeout 15 --max-time 180 \
-       --output "$DMR_TMP" "$DMR_URL" && \
-     awk 'BEGIN{n=0} $1 ~ /^[0-9]+$/ && NF>=2 {n++} END{exit(n>=100 ? 0 : 1)}' "$DMR_TMP"; then
-    chmod 0640 "$DMR_TMP"
-    chown "$SERVICE_USER:$SERVICE_USER" "$DMR_TMP"
-    mv -f -- "$DMR_TMP" "$DMR_IDS"
-    msg "DMR ID database downloaded." "Database ID DMR scaricato."
-  else
-    rm -f -- "$DMR_TMP"
-    msg "WARNING: DMR ID download failed; dashboard installation continues without IDs." \
-        "ATTENZIONE: download ID DMR non riuscito; installazione dashboard prosegue senza ID." >&2
-  fi
+  "$APP/scripts/update-dmr-ids.sh" "$APP" || die "DMR database download failed." "Download database DMR fallito."
 else
   msg "Existing DMR ID database preserved." "Database ID DMR esistente conservato."
 fi
@@ -440,7 +482,7 @@ https_install_cleanup() {
   local rc=$?
   trap - EXIT INT TERM
   rm -f -- "${HTTPS_RESULT_FILE:-}"
-  if (( rc != 0 && HTTPS_COMMITTED == 0 )); then
+  if (( rc != 0 && HTTPS_COMMITTED == 0 && REINSTALL != true )); then
     if (( HTTPS_CREATED == 1 )); then
       a2dissite mmdvm-dashboard-mqtt-ssl >/dev/null 2>&1 || true
       rm -f -- /etc/apache2/sites-available/mmdvm-dashboard-mqtt-ssl.conf
@@ -460,11 +502,15 @@ https_install_cleanup() {
 trap https_install_cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-cat > /etc/apache2/conf-available/mmdvm-dashboard-mqtt-api.conf <<EOF
+if [[ ! -e /etc/apache2/conf-available/mmdvm-dashboard-mqtt-api.conf ]]; then
+  cat > /etc/apache2/conf-available/mmdvm-dashboard-mqtt-api.conf <<EOF
 ProxyPreserveHost On
 ProxyPass /api/ http://127.0.0.1:8089/api/
 ProxyPassReverse /api/ http://127.0.0.1:8089/api/
 EOF
+else
+  msg 'Existing Apache API proxy preserved.' 'Proxy API Apache esistente conservato.'
+fi
 a2enmod proxy proxy_http ssl >/dev/null
 a2enconf mmdvm-dashboard-mqtt-api >/dev/null
 
@@ -493,13 +539,24 @@ else
 fi
 # Start backend/collector only after Apache configuration is accepted.
 systemctl daemon-reload
+
 systemctl enable --now mmdvm-mqtt-collector.service mmdvm-dashboard-mqtt.service
+if [[ $REINSTALL == true ]]; then
+  systemctl restart mmdvm-mqtt-collector.service mmdvm-dashboard-mqtt.service
+fi
 # Do not enable Telegram until configured by the administrator.
-systemctl disable mmdvm-telegram-bot.service >/dev/null 2>&1 || true
+if [[ $REINSTALL != true ]]; then
+  systemctl disable mmdvm-telegram-bot.service >/dev/null 2>&1 || true
+fi
+systemctl enable --now "mmdvm-dmr-ids-update@$(basename "$APP").timer"
 HTTPS_COMMITTED=1
 trap - EXIT INT TERM
 rm -f -- "$HTTPS_RESULT_FILE"
-msg "Telegram service installed but disabled." "Servizio Telegram installato ma disabilitato."
+if [[ $REINSTALL == true ]]; then
+  msg 'Telegram service state preserved.' 'Stato del servizio Telegram conservato.'
+else
+  msg 'Telegram service installed but disabled.' 'Servizio Telegram installato ma disabilitato.'
+fi
 
 printf '\n%s\n' '============================================================'
 msg 'MMDVM DASHBOARD MQTT - INSTALLATION COMPLETED' 'MMDVM DASHBOARD MQTT - INSTALLAZIONE COMPLETATA'

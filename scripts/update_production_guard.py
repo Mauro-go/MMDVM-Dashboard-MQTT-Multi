@@ -9,13 +9,10 @@ from pathlib import Path
 
 from update_transaction_state import pending_transactions
 
-BASE = Path("/var/lib/mmdvm-dashboard-updates")
-DESTINATION = Path("/opt/MMDVM-Dashboard-MQTT-Multi")
-
-SERVICES = (
-    "mmdvm-dashboard-multi.service",
-    "mmdvm-multi-collector.service",
-)
+from update_runtime import app_root, base, metadata
+BASE = base()
+DESTINATION = app_root()
+SERVICES = tuple(metadata()["services"])
 
 
 @contextmanager
@@ -125,7 +122,7 @@ def production_preflight(release, destination=DESTINATION):
 
     if destination != DESTINATION.resolve(strict=True):
         raise RuntimeError(
-            "Destinazione di produzione non autorizzata"
+            "Destinazione diversa da quella installata"
         )
 
     verify_no_pending()

@@ -1,0 +1,10 @@
+[Unit]
+Description=Aggiornamento database ID DMR per %i
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/opt/%i/scripts/update-dmr-ids.sh /opt/%i
+TimeoutStartSec=240

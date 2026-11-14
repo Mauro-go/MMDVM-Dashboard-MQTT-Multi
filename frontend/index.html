@@ -968,7 +968,8 @@ tbody tr:last-child td { border-bottom: none; }
     <col style="width:13%">
     <col style="width:7%">
     <col style="width:7%">
-    <col style="width:15%">
+    <col style="width:10%">
+    <col style="width:9%">
     <col style="width:12%">
     <col style="width:6%">
     <col style="width:7%">
@@ -984,8 +985,9 @@ tbody tr:last-child td { border-bottom: none; }
     <th data-i18n="mode">Modo</th>
     <th data-i18n="origin">Origine</th>
     <th data-i18n="callsign_id">Callsign / ID</th>
+    <th>Nome</th>
     <th data-i18n="destination">Destinazione</th>
-    <th data-i18n="slot">Slot</th>
+    <th>REF/SLOT</th>
     <th data-i18n="duration">Durata</th>
     <th data-i18n="ber">BER</th>
     <th>S-meter</th>
@@ -995,7 +997,7 @@ tbody tr:last-child td { border-bottom: none; }
 </thead>
 
 <tbody id="heard">
-<tr><td colspan="11" data-i18n="loading">Caricamento...</td></tr>
+<tr><td colspan="12" data-i18n="loading">Caricamento...</td></tr>
 </tbody>
 </table>
 
@@ -1210,6 +1212,9 @@ async function loadLive() {
         if (e.destination)
             h += `<span class="live-tag">${e.destination}</span>`;
 
+        if (e.mode === "D-Star" && e.reflector)
+            h += `<span class="live-tag">Reflector: ${e.reflector}</span>`;
+
         if (e.slot)
             h += `<span class="live-tag">TS${e.slot}</span>`;
 
@@ -1289,7 +1294,7 @@ function renderHeard() {
 
     if (!events.length) {
         tbody.innerHTML =
-            `<tr><td colspan="11" class="muted" style="text-align:center;padding:28px">${t("no_activity_24h")}</td></tr>`;
+            `<tr><td colspan="12" class="muted" style="text-align:center;padding:28px">${t("no_activity_24h")}</td></tr>`;
         return;
     }
 
@@ -1359,18 +1364,18 @@ function renderHeard() {
             </td>
 
             <td class="source">
-                ${
-                    e.mode === "DMR" && e.callsign
-                    ? `<div>${e.callsign}</div>
-                       <div class="muted" style="font-size:10px;font-weight:normal">
-                           ${e.source}${e.name ? " · " + e.name : ""}
-                       </div>`
-                    : e.source
-                }
+                <div class="operator-callsign"></div>
+                <div class="muted operator-id"
+                     style="font-size:10px;font-weight:normal"></div>
             </td>
+            <td class="operator-name"></td>
 
             <td>${e.destination}</td>
-            <td>${e.slot ? "TS"+e.slot : ""}</td>
+            <td>${e.mode === "DMR"
+                ? (e.slot ? "TS" + e.slot : "")
+                : (e.mode === "D-Star" || e.mode === "YSF")
+                    ? (e.reflector || "")
+                    : ""}</td>
             <td>${e.duration !== null ? e.duration.toFixed(1)+" s" : ""}</td>
             <td>${e.ber !== null ? e.ber.toFixed(1)+"%" : ""}</td>
             <td>${smeter}</td>
@@ -1380,18 +1385,49 @@ function renderHeard() {
 
         const sourceCell = tr.querySelector("td.source");
         if (sourceCell) {
-            const value = e.mode === "DMR" && e.callsign
+            const isDStar = e.mode === "D-Star";
+            const value = (e.mode === "DMR" || isDStar) && e.callsign
                 ? e.callsign : e.source;
-            const link = qrzLink(value);
+
+            const callsignElement =
+                sourceCell.querySelector(".operator-callsign");
+            const idElement =
+                sourceCell.querySelector(".operator-id");
+            const nameElement =
+                tr.querySelector("td.operator-name");
+
+            const parts = isDStar
+                ? String(value || "").split("/", 2)
+                : [String(value || "")];
+
+            const baseCallsign = parts[0].trim();
+            const suffix = isDStar && parts.length > 1
+                ? "/" + parts[1].trim() : "";
+
+            const link = qrzLink(baseCallsign);
 
             if (link) {
-                if (e.mode === "DMR" && e.callsign) {
-                    const first = sourceCell.querySelector("div");
-                    if (first) first.replaceChildren(link);
-                } else {
-                    sourceCell.replaceChildren(link);
-                }
+                callsignElement.replaceChildren(link);
+            } else {
+                callsignElement.textContent = baseCallsign;
             }
+
+            if (suffix) {
+                const ext = document.createElement("span");
+                ext.className = "muted";
+                ext.style.cssText =
+                    "font-size:11px;font-weight:normal;margin-left:5px";
+                ext.textContent = suffix;
+                callsignElement.appendChild(ext);
+            }
+
+            const radioId = e.mode === "DMR" && e.callsign
+                ? String(e.source || "").trim() : "";
+
+            idElement.textContent = radioId;
+            idElement.hidden = !radioId;
+
+            nameElement.textContent = String(e.name || "").trim();
         }
 
         tbody.appendChild(tr);

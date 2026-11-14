@@ -319,72 +319,41 @@ function renderUpdates(){
 
 const isIt=lang==='it';
 
- const info=document.createElement('div');
- info.className='notice';
- info.textContent=isIt
-  ? 'La verifica delle release è disponibile. L’installazione è temporaneamente disabilitata fino al completamento dei controlli di sicurezza e rollback.'
-  : 'Release checking is available. Installation is temporarily disabled until safety and rollback checks are completed.';
-
  const heading=document.createElement('h3');
- heading.textContent=isIt?'Modalità di aggiornamento':'Update mode';
-
- const manual=document.createElement('label');
- manual.className='telegram-check';
- const manualRadio=document.createElement('input');
- manualRadio.type='radio';
- manualRadio.name='updateMode';
- manualRadio.value='manual';
- manualRadio.checked=updateModePreference==='manual';
- manual.append(manualRadio,document.createTextNode(
-  isIt?' Manuale (consigliato)':' Manual (recommended)'
- ));
-
- const automatic=document.createElement('label');
- automatic.className='telegram-check';
- const autoRadio=document.createElement('input');
- autoRadio.type='radio';
- autoRadio.name='updateMode';
- autoRadio.value='automatic';
- autoRadio.checked=updateModePreference==='automatic';
- automatic.append(autoRadio,document.createTextNode(
-  isIt?' Automatico':' Automatic'
- ));
-
- const description=document.createElement('div');
- description.className='notice';
- description.style.marginTop='18px';
-
- function updateDescription(){
-  description.textContent=manualRadio.checked
-   ? (isIt
-      ? 'Verifica la nuova versione, consulta le modifiche, conferma l’installazione. Il sistema dovrà eseguire backup, verifica e rollback in caso di errore.'
-      : 'Check the new version, review changes and confirm installation. The system will perform backup, validation and rollback on failure.')
-   : (isIt
-      ? 'Gli aggiornamenti automatici saranno opzionali e inizialmente disabilitati. Saranno installate soltanto release stabili, con backup e controlli.'
-      : 'Automatic updates will be optional and disabled by default. Only stable releases will be installed, with backups and checks.');
- }
-
- manualRadio.addEventListener('change',()=>{
-  if(manualRadio.checked)saveUpdateMode('manual');
+ heading.textContent=isIt?'Modalità aggiornamenti':'Update mode';
+ const manual=document.createElement('label');manual.className='telegram-check';
+ const manualRadio=document.createElement('input');manualRadio.type='radio';manualRadio.name='updateMode';manualRadio.value='manual';manualRadio.checked=updateModePreference==='manual';
+ manual.append(manualRadio,document.createTextNode(isIt?' Manuale (consigliato)':' Manual (recommended)'));
+ const automatic=document.createElement('label');automatic.className='telegram-check';
+ const autoRadio=document.createElement('input');autoRadio.type='radio';autoRadio.name='updateMode';autoRadio.value='automatic';autoRadio.checked=updateModePreference==='automatic';
+ automatic.append(autoRadio,document.createTextNode(isIt?' Automatico (controllo ogni 10 minuti)':' Automatic (10-minute checks)'));
+ manualRadio.addEventListener('change',()=>{if(manualRadio.checked)saveUpdateMode('manual')});
+ autoRadio.addEventListener('change',()=>{if(autoRadio.checked)saveUpdateMode('automatic')});
+ const info=document.createElement('div');info.className='notice';
+ info.textContent=isIt?'Il sistema verifica le release stabili. Backup e rollback sono gestiti dal servizio di aggiornamento.':'Stable releases only; backup and rollback are managed by the update service.';
+ const button=document.createElement('button');button.type='button';button.className='btn';
+ button.textContent=isIt?'Installa aggiornamento':'Install update';
+ button.disabled=updateInfo?.status!=='update_available'||!updateInfo?.latest;
+ button.addEventListener('click',async()=>{
+   const version=updateInfo?.latest;
+   if(!version||!confirm((isIt?'Confermi l’aggiornamento alla versione ':'Confirm update to version ')+version+'?'))return;
+   button.disabled=true;
+   try{
+     await post('updates/install',{version},true);
+     info.textContent=isIt?'Aggiornamento in attesa di esecuzione…':'Update queued…';
+     const poll=async()=>{try{const result=await api('updates/progress');const v=result.progress||{};info.textContent=(v.state||'idle')+' — '+(v.detail||v.version||'');if(['completed','failed','blocked'].includes(v.state)){button.disabled=false;return;}}catch(error){info.textContent=error.message;button.disabled=false;return;}setTimeout(poll,3000);};
+     poll();
+   }catch(error){info.textContent=error.message;button.disabled=false;}
  });
- autoRadio.addEventListener('change',()=>{
-  if(autoRadio.checked)saveUpdateMode('automatic');
+ const progress=document.createElement('button');progress.type='button';progress.className='btn secondary';
+ progress.textContent=isIt?'Stato installazione':'Installation status';
+ progress.addEventListener('click',async()=>{
+   try{const result=await api('updates/progress');info.textContent=JSON.stringify(result.progress);}catch(error){info.textContent=error.message;}
  });
-
- const button=document.createElement('button');
- button.type='button';
- button.className='btn';
- button.disabled=true;
- button.textContent=isIt?'Funzione in preparazione':'Coming soon';
-
- area.append(info,heading,manual,automatic,description,button);
- manualRadio.disabled=updateModeSaving || !updateModeLoaded;
- autoRadio.disabled=updateModeSaving || !updateModeLoaded;
- updateDescription();
-
- if(authenticated && !updateModeLoaded && !updateModeLoading){
-  loadUpdateMode();
- }
+ area.append(heading,manual,automatic,info,button,progress);
+ manualRadio.disabled=updateModeSaving||!updateModeLoaded;
+ autoRadio.disabled=updateModeSaving||!updateModeLoaded;
+ if(authenticated&&!updateModeLoaded&&!updateModeLoading)loadUpdateMode();
 }
 
 const telegramLabels={

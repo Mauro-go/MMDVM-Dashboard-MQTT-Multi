@@ -214,61 +214,66 @@ def recover_pending():
 
 
 def prepare_staged_permissions(staged):
-    """Prepara i permessi della copia temporanea, mai della release."""
-    import os
+    """Keep executable code root-owned and readable by the Multi service user."""
     import stat
-    import pwd
-    import grp
 
     staged = Path(staged)
-    account = pwd.getpwnam("mmdvm-dashboard")
-    uid = account.pw_uid
-    gid = account.pw_gid
-
     for component in COMPONENTS:
         root = staged / component
-
         if root.is_symlink():
             raise RuntimeError("Symlink non consentito: " + str(root))
-
         if root.is_dir():
-            for directory, dirs, files in os.walk(root):
+            for directory, dirs, files in os.walk(root, followlinks=False):
                 directory = Path(directory)
-
                 if directory.is_symlink():
                     raise RuntimeError("Symlink non consentito")
-
-                os.chown(directory, uid, gid)
-                os.chmod(directory, 0o750)
-
+                os.chown(directory, 0, 0)
+                os.chmod(directory, 0o755)
                 for name in dirs:
-                    child = directory / name
-                    if child.is_symlink():
+                    if (directory / name).is_symlink():
                         raise RuntimeError("Symlink non consentito")
-
                 for name in files:
                     child = directory / name
-
                     if child.is_symlink() or not child.is_file():
                         raise RuntimeError("File non valido: " + str(child))
-
-                    old_mode = stat.S_IMODE(child.stat().st_mode)
-                    mode = 0o750 if old_mode & 0o111 else 0o640
-
-                    os.chown(child, uid, gid)
-                    os.chmod(child, mode)
-
+                    executable = bool(stat.S_IMODE(child.stat().st_mode) & 0o111)
+                    os.chown(child, 0, 0)
+                    os.chmod(child, 0o755 if executable else 0o644)
         elif root.is_file():
-            os.chown(root, uid, gid)
-            os.chmod(root, 0o640)
+            os.chown(root, 0, 0)
+            os.chmod(root, 0o644)
         else:
             raise RuntimeError("Componente mancante: " + str(root))
 
-    for component in COMPONENTS:
-        root = staged / component
-        if root.is_dir():
-            if not os.access(root, os.R_OK | os.X_OK):
-                raise RuntimeError("Permessi insufficienti: " + str(root))
+
+def preserve_local_frontend(destination, staging):
+    """Preserve local images and favicons absent from the official release.
+
+    Reject conflicting files rather than silently overwriting a new release.
+    """
+    source = destination / "frontend"
+    target = staging / "frontend"
+    allowed = ("images/",)
+    favicons = {
+        "favicon.ico", "favicon-16x16.png", "favicon-32x32.png",
+        "apple-touch-icon.png", "android-chrome-192x192.png",
+        "android-chrome-512x512.png",
+    }
+    for file in source.rglob("*"):
+        if file.is_symlink():
+            raise RuntimeError("Link simbolico nel frontend installato")
+        if not file.is_file():
+            continue
+        relative = file.relative_to(source)
+        name = relative.as_posix()
+        if name not in favicons and not any(name.startswith(x) for x in allowed):
+            continue
+        output = target / relative
+        if output.exists():
+            # Release content wins when the same path exists; do not replace it.
+            continue
+        output.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(file, output, follow_symlinks=False)
 
 
 def install(release):
@@ -332,9 +337,22 @@ def install(release):
         if fingerprint(staging) != fingerprint(release):
             raise RuntimeError("Staging non coerente")
 
-        # Evita rename fra filesystem differenti.
-        if os.stat(staging).st_dev != os.stat(destination).st_dev:
-            raise RuntimeError("Staging su filesystem differente")
+        preserve_local_frontend(destination, staging)
+        expected_installed = fingerprint(staging)
+
+        # Preflight: cross-filesystem staging is supported by copying each
+        # component to a sibling inside the installation before rename.
+        for component in COMPONENTS:
+            current = destination / component
+            incoming = staging / component
+            if current.is_symlink() or incoming.is_symlink() or not current.exists() or not incoming.exists():
+                raise RuntimeError("Componente non valido: " + component)
+            if os.path.ismount(current):
+                raise RuntimeError("Componente montato separatamente: " + str(current))
+            for prefix in (".mmdvm-previous-", ".mmdvm-incoming-"):
+                residue = destination / (prefix + component)
+                if residue.exists() or residue.is_symlink():
+                    raise RuntimeError("Residuo di aggiornamento: " + str(residue))
 
         # Persistenza dei file prima di toccare i servizi.
         os.sync()
@@ -359,7 +377,7 @@ def install(release):
                 component,
             )
 
-        if fingerprint(destination) != fingerprint(release):
+        if fingerprint(destination) != expected_installed:
             raise RuntimeError("Installazione non coerente")
 
         record(journal, state, "starting")
@@ -371,6 +389,17 @@ def install(release):
             raise RuntimeError("Controllo HTTP/systemd fallito")
 
         cleanup_staging(state)
+
+        # The verified backup is retained in the transaction directory;
+        # old live components are no longer needed after a healthy start.
+        for component in COMPONENTS:
+            previous = destination / (".mmdvm-previous-" + component)
+            if previous.is_symlink():
+                raise RuntimeError("Residuo symlink imprevisto: " + str(previous))
+            if previous.is_dir():
+                shutil.rmtree(previous)
+            elif previous.exists():
+                previous.unlink()
 
         record(journal, state, "completed")
 

@@ -1,4 +1,5 @@
 from node_paths import data_file
+from dstar_reflector import resolve_dstar_reflector_at
 from contextlib import closing
 #!/usr/bin/env python3
 """Read-only reconstruction of MQTT transmissions from events.sqlite3.
@@ -73,6 +74,14 @@ def reconstruct(db=DB):
                         destination = ('DG-ID ' + str(dg) if dg is not None else '')
                         if reflector:
                             destination += (' @ ' if destination else '') + reflector
+                reflector = str(head.get('reflector') or '').strip()
+                if mode == 'D-Star':
+                    reflector = resolve_dstar_reflector_at(
+                        source=head.get('source'),
+                        timestamp=started,
+                        reflector=reflector,
+                        db=db,
+                    )
                 rssi = p.get('rssi')
                 rssi_avg = rssi.get('ave') if isinstance(rssi, dict) else None
                 date, time = local_date_time(started)
@@ -80,6 +89,7 @@ def reconstruct(db=DB):
                     'date': date, 'time': time, 'mode': mode,
                     'direction': direction, 'source': source, 'callsign': callsign,
                     'name': '', 'destination': destination, 'slot': slot,
+                    'reflector': reflector,
                     'duration': p.get('duration'), 'ber': p.get('ber'),
                     'rssi': rssi_avg, 'loss': p.get('loss'),
                     'type': mode.lower().replace('-', '') + ('_rf' if direction == 'RF' else '_net'),

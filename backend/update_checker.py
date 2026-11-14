@@ -13,10 +13,7 @@ from urllib.request import Request, urlopen
 
 APP_ROOT = Path(__file__).resolve().parent.parent
 VERSION_FILE = APP_ROOT / "VERSION"
-RELEASE_URL = (
-    "https://api.github.com/repos/"
-    "Mauro-go/MMDVM-Dashboard-MQTT/releases/latest"
-)
+from update_origin import get_repository
 
 VERSION_PATTERN = re.compile(
     r"^v?(\d+)\.(\d+)\.(\d+)$"
@@ -159,7 +156,7 @@ def inspect_agent_release_asset(release):
     url = asset.get("browser_download_url", "")
 
     if not isinstance(url, str) or not url.startswith(
-        "https://github.com/Mauro-go/MMDVM-Dashboard-MQTT/releases/download/"
+        f"https://github.com/{get_repository()}/releases/download/"
     ):
         raise ValueError("URL asset Agent non autorizzato")
 
@@ -175,7 +172,7 @@ def inspect_agent_release_asset(release):
         url,
         headers={
             "Accept": "application/octet-stream",
-            "User-Agent": "MMDVM-Dashboard-MQTT",
+            "User-Agent": "MMDVM-Dashboard-MQTT-Multi",
         },
     )
 
@@ -209,11 +206,18 @@ def check_updates():
         "error": None,
     }
 
+    try:
+        repository = get_repository()
+    except (OSError, RuntimeError) as exc:
+        result["status"] = "error"
+        result["error"] = str(exc)
+        return result
+
     request = Request(
-        RELEASE_URL,
+        f"https://api.github.com/repos/{repository}/releases/latest",
         headers={
             "Accept": "application/vnd.github+json",
-            "User-Agent": "MMDVM-Dashboard-MQTT",
+            "User-Agent": "MMDVM-Dashboard-MQTT-Multi",
         },
     )
 
@@ -237,7 +241,7 @@ def check_updates():
 
     url = release.get("html_url")
     if isinstance(url, str) and url.startswith(
-        "https://github.com/Mauro-go/MMDVM-Dashboard-MQTT/releases/"
+        f"https://github.com/{repository}/releases/"
     ):
         result["release_url"] = url
 

@@ -112,6 +112,38 @@ def get_dmr_ids():
     return DMR_IDS
 
 
+# Indice nominativo -> primo nome, ricostruito solo quando
+# cambia il database DMRIds.dat.
+_CALLSIGN_NAMES = {}
+_CALLSIGN_NAMES_SOURCE = None
+
+
+def get_callsign_names():
+    global _CALLSIGN_NAMES, _CALLSIGN_NAMES_SOURCE
+
+    ids = get_dmr_ids()
+
+    if _CALLSIGN_NAMES_SOURCE is not ids:
+        names = {}
+
+        for entry in ids.values():
+            callsign = str(entry.get("callsign") or "").strip().upper()
+            full_name = str(entry.get("name") or "").strip()
+
+            if callsign and full_name and callsign not in names:
+                names[callsign] = full_name.split()[0]
+
+        _CALLSIGN_NAMES = names
+        _CALLSIGN_NAMES_SOURCE = ids
+
+    return _CALLSIGN_NAMES
+
+
+def get_operator_name(callsign):
+    callsign = str(callsign or "").strip().upper().split("/")[0].strip()
+    return get_callsign_names().get(callsign, "")
+
+
 PATTERNS = [
     # DMR RF
     (

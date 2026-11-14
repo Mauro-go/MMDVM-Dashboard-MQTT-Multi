@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Motore transazionale: installazione e rollback su percorsi di test."""
+"""Motore transazionale: installazione e rollback su installazioni locali o remote."""
 
 import hashlib
 import json
@@ -58,30 +58,63 @@ def copy_snapshot(source, destination):
             shutil.copy2(src, dst)
 
 
+def _remove_path(path):
+    path = Path(path)
+    if path.is_symlink():
+        raise RuntimeError("Symlink imprevisto: " + str(path))
+    if path.is_dir():
+        shutil.rmtree(path)
+    elif path.exists():
+        path.unlink()
+
+
+def _local_displaced(application, component):
+    # Must live on the SAME mount as the installed component, not in
+    # the persistent backup (which can be a different LXC mount).
+    return Path(application) / (".mmdvm-previous-" + component)
+
+
 def swap_component(staged, application, transaction, component):
+    """Copy to a sibling on the destination mount, then rename locally.
+
+    Staging may live on a different LXC bind mount even when both paths
+    share /opt. Never rename directly from staging to the live component.
+    """
     staged = Path(staged)
     application = Path(application)
-    transaction = Path(transaction)
-
-    previous_dir = transaction / "previous"
-    previous_dir.mkdir(exist_ok=True)
-
     current = application / component
     incoming = staged / component
-    previous = previous_dir / component
+    previous = _local_displaced(application, component)
+    local_incoming = application / (".mmdvm-incoming-" + component)
 
-    if previous.exists():
-        raise RuntimeError("Componente precedente già presente")
+    if previous.exists() or previous.is_symlink():
+        raise RuntimeError("Componente precedente non recuperato: " + str(previous))
+    if local_incoming.exists() or local_incoming.is_symlink():
+        raise RuntimeError("Componente temporaneo non recuperato: " + str(local_incoming))
+    if not current.exists() or current.is_symlink() or incoming.is_symlink():
+        raise RuntimeError("Componente non valido: " + component)
+    if os.path.ismount(current):
+        raise RuntimeError("Componente montato separatamente: " + str(current))
 
-    os.replace(current, previous)
+    # copytree/copy2 work across mounts. The sibling is guaranteed to be
+    # created on the destination directory's filesystem.
+    if incoming.is_dir():
+        shutil.copytree(incoming, local_incoming, symlinks=False)
+    elif incoming.is_file():
+        shutil.copy2(incoming, local_incoming)
+    else:
+        raise RuntimeError("Componente sorgente assente: " + component)
 
     try:
-        os.replace(incoming, current)
-    except BaseException:
-        if not current.exists() and previous.exists():
-            os.replace(previous, current)
-        raise
-
+        os.replace(current, previous)
+        try:
+            os.replace(local_incoming, current)
+        except BaseException:
+            if not current.exists() and previous.exists():
+                os.replace(previous, current)
+            raise
+    finally:
+        _remove_path(local_incoming)
 
 
 def restore_snapshot(snapshot, application, transaction):
@@ -96,16 +129,12 @@ def restore_snapshot(snapshot, application, transaction):
         source = snapshot / component
         current = application / component
         temporary = application / (".restore-" + component)
-        displaced = transaction / ("displaced-" + component)
+        displaced = _local_displaced(application, component)
 
-        for path in (temporary, displaced):
-            if path.is_symlink():
-                raise RuntimeError("Symlink imprevisto")
-
-            if path.is_dir():
-                shutil.rmtree(path)
-            elif path.exists():
-                path.unlink()
+        _remove_path(temporary)
+        # An earlier failed swap can leave a previous version in the
+        # application mount. The verified backup is authoritative.
+        _remove_path(displaced)
 
         if source.is_dir():
             shutil.copytree(source, temporary, symlinks=False)
@@ -113,6 +142,8 @@ def restore_snapshot(snapshot, application, transaction):
             shutil.copy2(source, temporary)
 
         if current.exists() or current.is_symlink():
+            if current.is_symlink():
+                raise RuntimeError("Symlink imprevisto: " + str(current))
             os.replace(current, displaced)
 
         try:
@@ -122,10 +153,7 @@ def restore_snapshot(snapshot, application, transaction):
                 os.replace(displaced, current)
             raise
 
-        if displaced.is_dir():
-            shutil.rmtree(displaced)
-        elif displaced.exists():
-            displaced.unlink()
+        _remove_path(displaced)
 
     if fingerprint(application) != expected:
         raise RuntimeError("Ripristino non coerente")
