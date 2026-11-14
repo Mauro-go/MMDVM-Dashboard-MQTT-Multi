@@ -14,6 +14,14 @@
 <label>Utente MQTT<input name="mqtt_username" autocomplete="off"></label>
 <label>Password MQTT<input name="mqtt_password" type="password" autocomplete="new-password"></label>
 <label class="check wide"><input name="tls" type="checkbox">Usa TLS per MQTT</label>
+<label class="check wide"><input name="agent_same_broker" type="checkbox" checked>Agent: stesso broker degli eventi MMDVM</label>
+<div id="agentBrokerFields" class="wide" hidden style="display:none;grid-template-columns:1fr 1fr;gap:18px;border:1px solid #506580;border-radius:8px;padding:15px">
+<label>Broker Agent MQTT<input name="agent_host" value="127.0.0.1"></label>
+<label>Porta Agent MQTT<input name="agent_port" type="number" min="1" max="65535" value="1883"></label>
+<label>Utente Agent MQTT<input name="agent_username" autocomplete="off"></label>
+<label>Password Agent MQTT<input name="agent_password" type="password" autocomplete="new-password"></label>
+<label class="check wide"><input name="agent_tls" type="checkbox">TLS per broker Agent</label>
+</div>
 <label>Utente Admin del nuovo nodo<input name="admin_username" required minlength="3" maxlength="64" autocomplete="off"></label>
 <label>Password Admin del nuovo nodo<input name="admin_password" type="password" required minlength="12" autocomplete="new-password"></label>
 <p class="wide">Queste credenziali valgono soltanto per il nuovo ripetitore. L’Admin principale gestisce l’elenco Multi.</p>
@@ -40,6 +48,8 @@ form.elements.callsign.addEventListener('input',()=>{const id=form.elements.call
 form.elements.node_id.addEventListener('input',()=>{form.elements.node_id.dataset.edited='1';fillTopics()});
 function fillTopics(){const id=form.elements.node_id.value;for(const [key,value] of [['topic','mmdvm/'+id+'/json'],['agent_topic_prefix','mmdvm-agent/'+id]])if(!form.elements[key].dataset.edited)form.elements[key].value=value}
 for(const name of ['topic','agent_topic_prefix'])form.elements[name].addEventListener('input',()=>form.elements[name].dataset.edited='1');
-form.addEventListener('submit',async event=>{event.preventDefault();const button=form.querySelector('button');button.disabled=true;message.textContent='Creazione in corso…';try{if(location.protocol!=='https:')throw Error('Apri la dashboard tramite HTTPS prima di inviare credenziali.');const session=await api('/api/admin/session');if(!session.authenticated)throw Error('Accedi prima all’Admin principale.');csrf=session.csrf_token;const data=Object.fromEntries(new FormData(form));data.port=Number(data.port);data.tls=form.elements.tls.checked;const result=await api('/api/admin/multi',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(data)});form.elements.admin_password.value='';form.elements.mqtt_password.value='';message.textContent='Creato '+result.node.callsign+' su /'+result.node.slug+'/';await refresh()}catch(error){message.textContent=error.message}finally{button.disabled=false}});
+function toggleAgentBroker(){const same=form.elements.agent_same_broker.checked;const area=document.getElementById('agentBrokerFields');area.hidden=same;area.style.display=same?'none':'grid'}
+form.elements.agent_same_broker.addEventListener('change',toggleAgentBroker);toggleAgentBroker();
+form.addEventListener('submit',async event=>{event.preventDefault();const button=form.querySelector('button');button.disabled=true;message.textContent='Creazione in corso…';try{if(location.protocol!=='https:')throw Error('Apri la dashboard tramite HTTPS prima di inviare credenziali.');const session=await api('/api/admin/session');if(!session.authenticated)throw Error('Accedi prima all’Admin principale.');csrf=session.csrf_token;const data=Object.fromEntries(new FormData(form));data.port=Number(data.port);data.tls=form.elements.tls.checked;data.agent_same_broker=form.elements.agent_same_broker.checked;data.agent_port=Number(data.agent_port);data.agent_tls=form.elements.agent_tls.checked;const result=await api('/api/admin/multi',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(data)});form.elements.admin_password.value='';form.elements.mqtt_password.value='';form.elements.agent_password.value='';message.textContent='Creato '+result.node.callsign+' su /'+result.node.slug+'/';await refresh()}catch(error){message.textContent=error.message}finally{button.disabled=false}});
 refresh().catch(error=>message.textContent=error.message);
 </script></body></html>

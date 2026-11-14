@@ -76,6 +76,8 @@ def main():
     db = connect()
     init_gateway_links(db)
     client = None
+    agent_client = None
+    agent_retry_at = 0.0
     current = None
     retry_at = 0
     last_cleanup_date = None
@@ -114,6 +116,7 @@ def main():
                 if agent_enabled and not agent_prefix:
                     raise ValueError("Remote Agent topic prefix is empty")
 
+                agent_separate = agent_enabled and settings.get("agent_same_broker", True) is False
                 signature = json.dumps({
                     "mqtt": settings,
                     "agent_enabled": agent_enabled,
@@ -125,6 +128,12 @@ def main():
                 time.sleep(3)
                 continue
             if signature != current and time.monotonic() >= retry_at:
+                if agent_client is not None:
+                    try:
+                        agent_client.disconnect()
+                    except Exception:
+                        pass
+                    agent_client = None
                 if client is not None:
                     try:
                         client.disconnect()
@@ -156,7 +165,7 @@ def main():
                     # COLLECTOR_CALLBACK_SNAPSHOT_V1
                     subscribed_topic = settings["topic"]
                     subscribed_gateways = tuple(gateway_topics)
-                    subscribed_agent = agent_enabled
+                    subscribed_agent = agent_enabled and not agent_separate
                     subscribed_prefix = agent_prefix
 
                     def connected(
@@ -185,10 +194,50 @@ def main():
                     new_client.connect(settings["host"], int(settings["port"]), keepalive=60)
                     client = new_client
                     current = signature
+                    # Separate Agent broker, with independent MQTT connection and callbacks.
+                    # Do not change or shadow mqtt_store.connect (SQLite).
+                    if agent_separate:
+                        agent_host = settings.get("agent_host") or settings["host"]
+                        agent_port = int(settings.get("agent_port") or settings["port"])
+                        agent_username = settings.get("agent_username") or ""
+                        agent_password = settings.get("agent_password") or ""
+                        agent_tls = bool(settings.get("agent_tls", False))
+                        def agent_message(c, userdata, msg):
+                            try:
+                                remote_agent.ingest(msg.topic, msg.payload)
+                            except Exception:
+                                logger.exception("Failed to ingest Agent message")
+                        def agent_connected(c, userdata, flags, rc):
+                            if rc == 0:
+                                c.subscribe(agent_prefix + "/#", qos=1)
+                                logger.info("Subscribed separate Agent: %s/#", agent_prefix)
+                            else:
+                                logger.error("Agent MQTT connect error: %s", rc)
+                        agent_client = mqtt.Client()
+                        agent_client.on_connect = agent_connected
+                        agent_client.on_message = agent_message
+                        if agent_username:
+                            agent_client.username_pw_set(agent_username, agent_password or None)
+                        if agent_tls:
+                            agent_client.tls_set()
+                        try:
+                            agent_client.connect(agent_host, agent_port, keepalive=60)
+                        except Exception as exc:
+                            logger.warning("Separate Agent MQTT connect pending: %s", exc)
+                            agent_retry_at = time.monotonic() + 5
                     logger.info("MQTT connection configured")
                 except Exception as exc:
                     logger.error("MQTT connection failed: %s", exc)
                     retry_at = time.monotonic() + 5
+            if agent_client is not None:
+                try:
+                    if time.monotonic() >= agent_retry_at:
+                        agent_rc = agent_client.loop(timeout=0.1)
+                        if agent_rc != mqtt.MQTT_ERR_SUCCESS:
+                            agent_client.reconnect()
+                except Exception as exc:
+                    logger.warning("Agent MQTT reconnect pending: %s", exc)
+                    agent_retry_at = time.monotonic() + 5
             if client is not None:
                 try:
                     rc = client.loop(timeout=1.0)
@@ -202,6 +251,8 @@ def main():
     except KeyboardInterrupt:
         logger.info("Stopped")
     finally:
+        if agent_client is not None:
+            agent_client.disconnect()
         if client is not None:
             client.disconnect()
         db.close()

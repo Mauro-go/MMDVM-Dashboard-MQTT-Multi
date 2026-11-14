@@ -21,11 +21,11 @@ def load():
 
 def public():
     data = load()
-    return {k: v for k, v in data.items() if k != "password"} | {"password_set": bool(data.get("password"))}
+    return {k: data.get(k) for k in ("host", "port", "topic", "username", "tls")} | {"password_set": bool(data.get("password")), "agent_password_set": bool(data.get("agent_password")), "agent_same_broker": data.get("agent_same_broker", True), "agent_host": data.get("agent_host", data.get("host", "127.0.0.1")), "agent_port": data.get("agent_port", data.get("port", 1883)), "agent_username": data.get("agent_username", ""), "agent_tls": data.get("agent_tls", False)}
 
 
 def save(changes):
-    if not isinstance(changes, dict) or set(changes) - {"host", "port", "topic", "username", "password", "clear_password", "tls"}:
+    if not isinstance(changes, dict) or set(changes) - {"host", "port", "topic", "username", "password", "clear_password", "tls", "agent_same_broker", "agent_host", "agent_port", "agent_username", "agent_password", "agent_tls", "clear_agent_password"}:
         raise ValueError("Invalid MQTT fields")
     data = load()
     for key in ("host", "topic", "username"):
@@ -57,6 +57,38 @@ def save(changes):
             data["password"] = val
     if data.get("password") and not data.get("username"):
         raise ValueError("MQTT username required when password is set")
+    for key in ("agent_same_broker", "agent_tls", "clear_agent_password"):
+        if key in changes and not isinstance(changes[key], bool):
+            raise ValueError("Invalid " + key)
+    for key in ("agent_host", "agent_username"):
+        if key in changes:
+            val = changes[key]
+            if not isinstance(val, str) or len(val) > 255 or (key == "agent_host" and not val.strip()):
+                raise ValueError("Invalid " + key)
+            if any(ord(c) < (32 if key == "agent_username" else 33) for c in val):
+                raise ValueError("Invalid " + key)
+            data[key] = val
+    if "agent_port" in changes:
+        val = changes["agent_port"]
+        if isinstance(val, bool) or not str(val).isdigit() or not 1 <= int(val) <= 65535:
+            raise ValueError("Invalid Agent MQTT port")
+        data["agent_port"] = int(val)
+    for key in ("agent_same_broker", "agent_tls"):
+        if key in changes:
+            data[key] = changes[key]
+    if changes.get("clear_agent_password"):
+        data["agent_password"] = ""
+    elif "agent_password" in changes:
+        val = changes["agent_password"]
+        if not isinstance(val, str) or len(val) > 1024 or any(ord(c) < 32 for c in val):
+            raise ValueError("Invalid Agent MQTT password")
+        if val:
+            data["agent_password"] = val
+    if not data.get("agent_same_broker", True):
+        if not data.get("agent_host", data["host"]):
+            raise ValueError("Agent MQTT host required")
+        if data.get("agent_password") and not data.get("agent_username"):
+            raise ValueError("Agent MQTT username required when password is set")
     SETTINGS.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".mqtt-", dir=str(SETTINGS.parent))
     try:

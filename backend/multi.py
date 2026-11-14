@@ -166,6 +166,24 @@ class Registry:
     def delete(self, slug):
         if not isinstance(slug, str) or not SLUG.fullmatch(slug):
             raise ValueError('Invalid repeater')
+        agent_same_broker = data.get('agent_same_broker', True)
+        if not isinstance(agent_same_broker, bool):
+            raise ValueError('Invalid Agent same-broker setting')
+        agent_host = data.get('agent_host', host)
+        agent_port = data.get('agent_port', port)
+        agent_user = data.get('agent_username', '')
+        agent_password = data.get('agent_password', '')
+        agent_tls = data.get('agent_tls', False)
+        if not isinstance(agent_host, str) or not agent_host.strip() or len(agent_host) > 253 or any(ord(c) < 33 for c in agent_host):
+            raise ValueError('Invalid Agent MQTT host')
+        if isinstance(agent_port, bool) or not isinstance(agent_port, int) or not 1 <= agent_port <= 65535:
+            raise ValueError('Invalid Agent MQTT port')
+        if not isinstance(agent_user, str) or not isinstance(agent_password, str) or max(len(agent_user), len(agent_password)) > 1024 or any(ord(c) < 32 for c in agent_user + agent_password):
+            raise ValueError('Invalid Agent MQTT credentials')
+        if not isinstance(agent_tls, bool):
+            raise ValueError('Invalid Agent MQTT TLS')
+        if not agent_same_broker and agent_password and not agent_user:
+            raise ValueError('Agent MQTT username required when password is set')
         with self.lock, (self.directory / '.registry.lock').open('a+') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             records = self.records()
@@ -352,7 +370,7 @@ class Registry:
                 with (directory / 'dashboard.ini').open('w') as handle:
                     cfg.write(handle)
                 os.chmod(directory / 'dashboard.ini', 0o600)
-                atomic_json(directory / 'data' / 'mqtt-settings.json', dict(host=host, port=port, topic=topic, username=mqtt_user, password=mqtt_password, tls=tls))
+                atomic_json(directory / 'data' / 'mqtt-settings.json', dict(host=host, port=port, topic=topic, username=mqtt_user, password=mqtt_password, tls=tls, agent_same_broker=agent_same_broker, agent_host=agent_host, agent_port=agent_port, agent_username=agent_user, agent_password=agent_password, agent_tls=agent_tls))
                 (directory / 'admin' / 'session-secret').write_text(secrets.token_hex(32))
                 os.chmod(directory / 'admin' / 'session-secret', 0o600)
                 atomic_json(directory / 'admin' / 'admin.json', dict(username=username, password_hash=generate_password_hash(password)))
